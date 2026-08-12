@@ -67,6 +67,24 @@ jobs:
           EOF
           grep -n -A3 "defined(__GFX7__)" c10/macros/Macros.h | head -6
 
+      - name: CMake 环境自检 (快速定位缺依赖)
+        run: |
+          cd /tmp/pytorch
+          export PATH=/opt/rocm-6.4.3/bin:$PATH
+          export LD_LIBRARY_PATH=/opt/rocm-6.4.3/lib:$LD_LIBRARY_PATH
+          export PYTORCH_ROCM_ARCH=gfx803
+          export ROCM_PATH=/opt/rocm-6.4.3
+          export USE_NCCL=0 USE_DISTRIBUTED=0
+          # 只跑 cmake configure, 完整输出
+          cmake -GNinja -DBUILD_PYTHON=True -DBUILD_TEST=True -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/pytorch/torch \
+            -DPython_EXECUTABLE=/usr/bin/python3 \
+            -DTORCH_BUILD_VERSION=2.8.0+git8d1791e \
+            -DUSE_DISTRIBUTED=0 -DUSE_NCCL=0 -DUSE_NUMPY=True \
+            /tmp/pytorch 2>&1 | tee /tmp/cmake.log | tail -40
+          echo "=== CMake 错误汇总 ==="
+          grep -iE "error|Could NOT|not found|missing" /tmp/cmake.log | head -30 || true
+
       - name: 编译 torch (gfx803)
         run: |
           cd /tmp/pytorch
@@ -75,9 +93,11 @@ jobs:
           export PYTORCH_ROCM_ARCH=gfx803
           export ROCM_PATH=/opt/rocm-6.4.3
           export MAX_JOBS=4
-          export USE_NCCL=0   # rccl 不参与, 避免麻烦
-          export USE_DISTRIBUTED=0
-          python3 setup.py bdist_wheel 2>&1 | tail -20
+          export USE_NCCL=0 USE_DISTRIBUTED=0
+          set -o pipefail
+          python3 setup.py bdist_wheel 2>&1 | tee /tmp/build.log | tail -30
+          echo "=== 构建日志错误段 ==="
+          grep -iE "error|failed|not found" /tmp/build.log | tail -30 || true
 
       - name: 上传 wheel
         uses: actions/upload-artifact@v4
