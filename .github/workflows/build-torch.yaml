@@ -67,7 +67,7 @@ jobs:
           EOF
           grep -n -A3 "defined(__GFX7__)" c10/macros/Macros.h | head -6
 
-      - name: CMake 环境自检 (快速定位缺依赖)
+      - name: CMake configure (out-of-source, setup.py 同款参数)
         run: |
           cd /tmp/pytorch
           export PATH=/opt/rocm-6.4.3/bin:$PATH
@@ -75,18 +75,19 @@ jobs:
           export PYTORCH_ROCM_ARCH=gfx803
           export ROCM_PATH=/opt/rocm-6.4.3
           export USE_NCCL=0 USE_DISTRIBUTED=0
-          # out-of-source configure
-          rm -rf /tmp/pytorch-build && mkdir -p /tmp/pytorch-build
-          cmake -S /tmp/pytorch -B /tmp/pytorch-build -GNinja \
+          # 预配置到 setup.py 期望的 build/ 目录 (cache 存在则 setup.py 跳过 configure)
+          rm -rf build && mkdir -p build
+          cmake -S /tmp/pytorch -B /tmp/pytorch/build -GNinja \
             -DBUILD_PYTHON=True -DBUILD_TEST=True -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/tmp/pytorch/torch \
+            -DCMAKE_PREFIX_PATH=/usr/local/lib/python3.12/dist-packages \
             -DPython_EXECUTABLE=/usr/bin/python3 \
             -DTORCH_BUILD_VERSION=2.8.0+git8d1791e \
             -DUSE_DISTRIBUTED=0 -DUSE_NCCL=0 -DUSE_NUMPY=True \
-            2>&1 | tee /tmp/cmake.log | tail -40
+            2>&1 | tee /tmp/cmake.log | tail -25
           echo "=== CMake 错误汇总 ==="
-          grep -iE "error|Could NOT|not found|missing" /tmp/cmake.log | head -30 || true
-          ls /tmp/pytorch-build/CMakeCache.txt && echo "CONFIGURE OK"
+          grep -iE "error|Could NOT|not found|missing" /tmp/cmake.log | head -20 || true
+          ls /tmp/pytorch/build/CMakeCache.txt && echo "CONFIGURE OK"
 
       - name: 编译 torch (gfx803)
         run: |
