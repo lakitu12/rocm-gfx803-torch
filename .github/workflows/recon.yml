@@ -1,0 +1,25 @@
+name: recon-runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 基础信息
+        run: |
+          echo "=== CPU ==="
+          nproc
+          echo "=== 内存 ==="
+          free -h
+          echo "=== 磁盘 ==="
+          df -h /
+          echo "=== Python ==="
+          python3 --version
+          which python3
+          echo "=== 是否有 ROCm ==="
+          ls /opt/ 2>/dev/null | grep -i rocm || echo "无 ROCm"
+          which hipcc 2>/dev/null || echo "无 hipcc"
+          echo "=== Ubuntu 版本 ==="
+          cat /etc/os-release | head -3
