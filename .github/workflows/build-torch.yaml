@@ -54,9 +54,18 @@ jobs:
           cd /tmp/pytorch
           grep -n "defined(__GFX9__)" c10/macros/Macros.h | head -2
           # 修复: GCN 全系列 (GFX7/8/9) 都是 wave64, 只有 RDNA (GFX10/11) 是 wave32
-          sed -i 's/#if defined(__GFX9__)/#if defined(__GFX7__) || defined(__GFX8__) || defined(__GFX9__)/' c10/macros/Macros.h
+          python3 - <<'EOF'
+          import re
+          p = 'c10/macros/Macros.h'
+          s = open(p).read()
+          old = '#if defined(__GFX9__)'
+          new = '#if defined(__GFX7__) || defined(__GFX8__) || defined(__GFX9__)'
+          assert old in s, "Macros.h 结构不符预期!"
+          s = s.replace(old, new)
+          open(p, 'w').write(s)
+          print("patch applied")
+          EOF
           grep -n -A3 "defined(__GFX7__)" c10/macros/Macros.h | head -6
-          echo "patch applied"
 
       - name: 编译 torch (gfx803)
         run: |
