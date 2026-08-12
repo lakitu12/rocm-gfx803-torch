@@ -1,0 +1,78 @@
+name: build-torch-gfx803
+
+on:
+  workflow_dispatch:
+    inputs:
+      rocm_release:
+        description: 'GitHub Release 名 (ROCm 分卷包)'
+        required: false
+        default: 'rocm-6.4.3'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载并解压 ROCm 6.4.3 分卷
+        run: |
+          set -e
+          # 从 GitHub Release 下载分卷 (rocm-6.4.3.part.NN.zst)
+          RELEASE="${{ github.event.inputs.rocm_release }}"
+          gh release download "$RELEASE" --repo ${{ github.repository }} --pattern 'rocm-6.4.3.part.*' --dir /tmp/rocm-parts
+          ls -la /tmp/rocm-parts
+          # 合并并解压到 /opt
+          cat /tmp/rocm-parts/rocm-6.4.3.part.* > /tmp/rocm-6.4.3.tar.zst
+          sudo mkdir -p /opt
+          sudo tar --zstd -xf /tmp/rocm-6.4.3.tar.zst -C /opt
+          ls /opt/rocm-6.4.3/bin/hipcc && echo "ROCm 解压 OK"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: 准备构建环境 (python + pytorch 依赖)
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build cmake libopenmpi-dev libomp-dev libnuma-dev \
+            libgoogle-glog-dev libgflags-dev libpng-dev libjpeg-dev libsqlite3-dev \
+            python3-dev python3-pip
+          pip3 install -q --break-system-packages \
+            typing-extensions sympy networkx jinja2 fsspec filelock packaging \
+            pyyaml numpy pillow requests setuptools wheel
+          echo "PATH=/opt/rocm-6.4.3/bin:$PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/opt/rocm-6.4.3/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: checkout pytorch 2.8 (8d1791e)
+        run: |
+          git clone --depth 1 https://github.com/pytorch/pytorch.git /tmp/pytorch
+          cd /tmp/pytorch
+          git fetch --depth 1 origin 8d1791e19169b3bb2b80357306ba1a22428abe38
+          git checkout FETCH_HEAD
+          git submodule sync
+          git submodule update --init --recursive --depth 1 2>&1 | tail -3
+
+      - name: 应用 gfx803 wave64 修复 (C10_WARP_SIZE)
+        run: |
+          cd /tmp/pytorch
+          grep -n "defined(__GFX9__)" c10/macros/Macros.h | head -2
+          # 修复: GCN 全系列 (GFX7/8/9) 都是 wave64, 只有 RDNA (GFX10/11) 是 wave32
+          sed -i 's/#if defined(__GFX9__)/#if defined(__GFX7__) || defined(__GFX8__) || defined(__GFX9__)/' c10/macros/Macros.h
+          grep -n -A3 "defined(__GFX7__)" c10/macros/Macros.h | head -6
+          echo "patch applied"
+
+      - name: 编译 torch (gfx803)
+        run: |
+          cd /tmp/pytorch
+          export PATH=/opt/rocm-6.4.3/bin:$PATH
+          export LD_LIBRARY_PATH=/opt/rocm-6.4.3/lib:$LD_LIBRARY_PATH
+          export PYTORCH_ROCM_ARCH=gfx803
+          export ROCM_PATH=/opt/rocm-6.4.3
+          export MAX_JOBS=4
+          export USE_NCCL=0   # rccl 不参与, 避免麻烦
+          export USE_DISTRIBUTED=0
+          python3 setup.py bdist_wheel 2>&1 | tail -20
+
+      - name: 上传 wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: torch-2.8.0-gfx803
+          path: /tmp/pytorch/dist/*.whl
+          retention-days: 30
