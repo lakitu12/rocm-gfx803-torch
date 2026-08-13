@@ -23,6 +23,10 @@ jobs:
           cat /tmp/rocm-parts/rocm-6.4.3.part.* > /tmp/rocm-6.4.3.tar.zst
           sudo mkdir -p /opt
           sudo tar --zstd -xf /tmp/rocm-6.4.3.tar.zst -C /opt
+          # kineto 的 roctracer 硬编码 -I/opt/rocm/include/roctracer (ROCm 默认安装路径),
+          # 必须有 /opt/rocm 软链接(本机 /opt/rocm -> /opt/rocm-6.4.3 同理)
+          sudo ln -sfn /opt/rocm-6.4.3 /opt/rocm
+          ls /opt/rocm/include/roctracer/roctracer.h >/dev/null && echo "roctracer.h OK"
           ls /opt/rocm-6.4.3/bin/hipcc && echo "ROCm 解压 OK"
         env:
           GH_TOKEN: ${{ github.token }}
