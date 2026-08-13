@@ -78,6 +78,7 @@ jobs:
           # 预配置到 setup.py 期望的 build/ 目录 (cache 存在则 setup.py 跳过 configure)
           rm -rf build && mkdir -p build
           set -o pipefail
+          # 注意: run: 默认 bash -e, cmake 失败会直接杀掉 shell, 必须用 if/|| 捕获
           cmake -S /tmp/pytorch -B /tmp/pytorch/build -GNinja \
             -DBUILD_PYTHON=True -DBUILD_TEST=True -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/tmp/pytorch/torch \
@@ -85,15 +86,26 @@ jobs:
             -DPython_EXECUTABLE=/usr/bin/python3 \
             -DTORCH_BUILD_VERSION=2.8.0+git8d1791e \
             -DUSE_DISTRIBUTED=0 -DUSE_NCCL=0 -DUSE_NUMPY=True \
-            > /tmp/cmake.log 2>&1
-          EC=$?
+            > /tmp/cmake.log 2>&1 || EC=$?
+          EC=${EC:-0}
           echo "=== CMake exit: $EC ==="
+          wc -l /tmp/cmake.log
           echo "=== CMake Error 段 ==="
-          grep -n -B5 -A25 "CMake Error" /tmp/cmake.log | head -80 || true
-          echo "=== 尾部 30 行 ==="
-          tail -30 /tmp/cmake.log
-          ls /tmp/pytorch/build/CMakeCache.txt && ls /tmp/pytorch/build/build.ninja && echo "CONFIGURE OK"
+          grep -n -B5 -A25 "CMake Error" /tmp/cmake.log | head -120 || true
+          echo "=== 尾部 40 行 ==="
+          tail -40 /tmp/cmake.log
+          if [ "$EC" = "0" ]; then
+            ls /tmp/pytorch/build/CMakeCache.txt && ls /tmp/pytorch/build/build.ninja && echo "CONFIGURE OK"
+          fi
           exit $EC
+
+      - name: 上传 cmake 日志 (总是上传)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-log
+          path: /tmp/cmake.log
+          retention-days: 30
 
       - name: 编译 torch (gfx803)
         run: |
@@ -105,9 +117,13 @@ jobs:
           export MAX_JOBS=4
           export USE_NCCL=0 USE_DISTRIBUTED=0
           set -o pipefail
-          python3 setup.py bdist_wheel 2>&1 | tee /tmp/build.log | tail -30
+          # bash -e 下用 || 捕获, 否则失败时错误段打印不出来
+          python3 setup.py bdist_wheel > /tmp/build.log 2>&1 || EC=$?
+          EC=${EC:-0}
+          tail -40 /tmp/build.log
           echo "=== 构建日志错误段 ==="
-          grep -iE "error|failed|not found" /tmp/build.log | tail -30 || true
+          grep -iE "error|failed|not found" /tmp/build.log | tail -40 || true
+          exit $EC
 
       - name: 上传 wheel
         uses: actions/upload-artifact@v4
