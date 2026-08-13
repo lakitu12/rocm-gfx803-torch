@@ -67,6 +67,22 @@ jobs:
           EOF
           grep -n -A3 "defined(__GFX7__)" c10/macros/Macros.h | head -6
 
+      - name: hipify (生成 c10/hip、aten/src/THH 等 ROCm 源)
+        run: |
+          cd /tmp/pytorch
+          # PyTorch 的 hip 目录(c10/hip、aten/src/THH、HIPConfig.h.in)不是仓库文件,
+          # 由 tools/amd_build/build_amd.py 从 cuda 源转换生成。官方 .ci/pytorch/build.sh
+          # 在 configure 之前调用它。纯 Python, 无 GPU 需求。
+          python3 tools/amd_build/build_amd.py > /tmp/hipify.log 2>&1 || EC=$?
+          EC=${EC:-0}
+          echo "=== hipify exit: $EC ==="
+          tail -5 /tmp/hipify.log
+          echo "=== 关键生成文件检查 ==="
+          ls -la c10/hip/impl/hip_cmake_macros.h.in 2>&1 | head -1
+          ls -la aten/src/ATen/hip/HIPConfig.h.in 2>&1 | head -1
+          ls -d aten/src/THH c10/hip/test 2>&1 | head -2
+          exit $EC
+
       - name: CMake configure (out-of-source, setup.py 同款参数)
         run: |
           cd /tmp/pytorch
