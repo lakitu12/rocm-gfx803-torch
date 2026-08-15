@@ -127,6 +127,12 @@ jobs:
           path: /tmp/cmake.log
           retention-days: 30
 
+      - name: 生成 codegen 头文件 (TensorBody.h 等)
+        run: |
+          cd /tmp/pytorch/build
+          ninja ATEN_CPU_FILES_GEN_TARGET ATEN_CUDA_FILES_GEN_TARGET 2>&1 | tail -3
+          ls aten/src/ATen/core/TensorBody.h && echo "CODEGEN OK"
+
       - name: 单独编译 Nonzero.hip (诊断 kernel codegen)
         run: |
           cd /tmp/pytorch
