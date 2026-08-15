@@ -87,6 +87,17 @@ jobs:
           ls -d aten/src/THH c10/hip/test 2>&1 | head -2
           exit $EC
 
+      - name: 去除 --offload-compress (gfx803 fatbin 修复)
+        run: |
+          cd /tmp/pytorch
+          # gfx803 上 CCOB(压缩)fatbin 经 ld 拼接后 HIP 运行时解析失败
+          # ("Cannot retrieve Static function" / invalid device function,
+          #  影响 nonzero/masked_select 等 hipcub 内核)。非压缩
+          # CLANG_OFFLOAD_BUNDLE 拼接后运行正常(已实测)。
+          grep -n "offload-compress" cmake/Dependencies.cmake
+          sed -i '/offload-compress/d' cmake/Dependencies.cmake
+          grep -c "offload-compress" cmake/Dependencies.cmake || echo "PATCH_OK: --offload-compress 已移除"
+
       - name: CMake configure (out-of-source, setup.py 同款参数)
         run: |
           cd /tmp/pytorch
