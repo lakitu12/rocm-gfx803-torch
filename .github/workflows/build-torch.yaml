@@ -127,6 +127,49 @@ jobs:
           path: /tmp/cmake.log
           retention-days: 30
 
+      - name: 单独编译 Nonzero.hip (诊断 kernel codegen)
+        run: |
+          cd /tmp/pytorch
+          export PATH=/opt/rocm-6.4.3/bin:$PATH
+          export LD_LIBRARY_PATH=/opt/rocm-6.4.3/lib:$LD_LIBRARY_PATH
+          set -o pipefail
+          hipcc --offload-arch=gfx803 \
+            -I/tmp/pytorch -I/tmp/pytorch/build -I/tmp/pytorch/build/aten/src \
+            -I/tmp/pytorch/build/c10 -I/tmp/pytorch/aten/src \
+            -I/opt/rocm-6.4.3/include \
+            -DUSE_ROCM -D__HIP_PLATFORM_AMD__=1 -D__HIP_NO_HALF_OPERATORS__=1 \
+            -D__HIP_NO_HALF_CONVERSIONS__=1 -DTORCH_HIP_VERSION=604 -DCAFFE2_USE_MIOPEN \
+            -DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_HIP -DHIPBLAS_V2 \
+            -DHIP_ENABLE_WARP_SYNC_BUILTINS -std=c++17 -O2 \
+            -c aten/src/ATen/native/hip/Nonzero.hip -o /tmp/Nonzero_diag.o 2>&1 | tee /tmp/nonzero_diag.log | tail -20 || EC=$?
+          EC=${EC:-0}
+          echo "=== nonzero_diag exit: $EC ==="
+          if [ "$EC" = "0" ]; then
+            echo "=== kernel 符号计数 ==="
+            objcopy --dump-section .hip_fatbin=/tmp/nz_diag_fatbin.bin /tmp/Nonzero_diag.o
+            echo "fatbin kernel strings: $(strings /tmp/nz_diag_fatbin.bin | grep -cE 'flag_kernel|write_indices|compute_agg')"
+          fi
+          exit $EC
+
+      - name: 上传 Nonzero 诊断产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nonzero-diagnostic
+          path: |
+            /tmp/Nonzero_diag.o
+            /tmp/nz_diag_fatbin.bin
+            /tmp/nonzero_diag.log
+          retention-days: 30
+
+      - name: 上传 build.ninja (真实编译命令)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-ninja
+          path: /tmp/pytorch/build/build.ninja
+          retention-days: 30
+
       - name: 编译 torch (gfx803)
         run: |
           cd /tmp/pytorch
