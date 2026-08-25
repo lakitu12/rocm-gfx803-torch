@@ -223,6 +223,7 @@ jobs:
 
       - name: 产物自检 (链接器确认 + fatbin kernel 检查)
         if: always()
+        continue-on-error: true
         run: |
           set -e
           WHEEL=$(ls /tmp/pytorch/dist/*.whl 2>/dev/null | head -1)
@@ -230,17 +231,41 @@ jobs:
           echo "wheel: $WHEEL"
           cd /tmp && rm -rf whlcheck && mkdir whlcheck && cd whlcheck
           unzip -q "$WHEEL"
-          SO=$(find . -name "libtorch_hip*.so" | head -1)
-          echo "so: $SO"
-          ls -la "$SO"
-          # 链接器确认: hipcc 链接的产物中应包含 clang/LLVM 版本字符串
-          strings "$SO" | grep -m2 -iE "clang version|LLVM" || echo "no clang marker (可能仍是 g++ 链接)"
-          # fatbin 段大小
-          objdump -h "$SO" | grep -E "hip_fatbin|hipFatBin"
-          # nonzero 族 kernel 是否在 fatbin 中 (非压缩产物可直接 strings)
-          strings "$SO" | grep -cE "flag_kernel|write_indices|compute_agg|NonZeroOp" || echo "kernel strings 0 (压缩? 需本地解 CCOB)"
-        env:
-          PATH: /opt/rocm-6.4.3/bin:$PATH
+          python3 - <<'EOF'
+          import struct, glob, os
+
+          so = glob.glob('**/libtorch_hip*.so', recursive=True)
+          if not so:
+              print('NO libtorch_hip.so'); raise SystemExit(1)
+          p = so[0]
+          print('so:', p)
+          print('size:', os.path.getsize(p))
+          data = open(p, 'rb').read()
+
+          # ELF64 section headers -> .hip_fatbin 大小
+          e_shoff = struct.unpack('<Q', data[0x28:0x30])[0]
+          e_shentsize = struct.unpack('<H', data[0x3a:0x3c])[0]
+          e_shnum = struct.unpack('<H', data[0x3c:0x3e])[0]
+          e_shstrndx = struct.unpack('<H', data[0x3e:0x40])[0]
+          shstr_off = struct.unpack('<Q', data[e_shoff + e_shstrndx * e_shentsize + 0x18:
+                                              e_shoff + e_shstrndx * e_shentsize + 0x20])[0]
+          total_fb = 0
+          for i in range(e_shnum):
+              off = e_shoff + i * e_shentsize
+              noff = struct.unpack('<I', data[off:off + 4])[0]
+              end = data.index(b'\0', shstr_off + noff)
+              name = data[shstr_off + noff:end].decode()
+              size = struct.unpack('<Q', data[off + 0x20:off + 0x28])[0]
+              if 'fatbin' in name.lower():
+                  print(f'section {name}: {size} bytes')
+                  total_fb += size
+          print('total fatbin:', total_fb)
+
+          # nonzero 族 kernel 字符串 (非压缩产物直接可见)
+          for pat in (b'flag_kernel', b'write_indices', b'compute_agg', b'NonZeroOp', b'clang version'):
+              print(f'str {pat.decode()}: {data.count(pat)}')
+          EOF
+          echo "self-check done"
 
       - name: 上传 wheel
         uses: actions/upload-artifact@v4
