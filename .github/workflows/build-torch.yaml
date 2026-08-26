@@ -105,11 +105,16 @@ jobs:
           # error: 218" → nonzero/masked_select invalid device function。
           # 本地穷举编译 flags/条目数均无法复现; 唯一未试: 链接器走 hipcc
           # (clang driver) 而非默认 g++ (CMAKE_CXX_COMPILER)。
+          # 2026-08-26 根因升级: 同一错误的真正机制 = 部分 stub 的 fatbin
+          # 引用(注册的 modules)落到依赖库 librocsparse(其 fatbin 无 gfx803
+          # 条目) → UNBUNDLE(gfx803)=空 → launch 98。libtorch_hip.so 自己的
+          # 234 个 TU fatbin 全含 gfx803, 同名 kernel 可跑(已实测重定向成功)。
+          # 加 -Wl,-Bsymbolic 强制库内符号引用绑定本库定义, 尝试根治。
           # CMake 规则: Linux-GNU platform 在 enable_language 时才生成默认
           # rule 变量, -C 预载(enable_language 前)设置即可覆盖。
           cat > /tmp/hipcc-link.cmake <<'EOF'
-          set(CMAKE_CXX_CREATE_SHARED_LIBRARY "hipcc <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> <SONAME_FLAG><TARGET_SONAME> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
-          set(CMAKE_CXX_LINK_EXECUTABLE "hipcc <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+          set(CMAKE_CXX_CREATE_SHARED_LIBRARY "hipcc <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> <SONAME_FLAG><TARGET_SONAME> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,-Bsymbolic")
+          set(CMAKE_CXX_LINK_EXECUTABLE "hipcc <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES> -Wl,-Bsymbolic")
           EOF
           echo "== hipcc-link.cmake =="
           cat /tmp/hipcc-link.cmake
