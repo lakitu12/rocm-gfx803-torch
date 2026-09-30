@@ -38,9 +38,11 @@ jobs:
           sudo apt-get install -y -qq ninja-build cmake libopenmpi-dev libomp-dev libnuma-dev \
             libgoogle-glog-dev libgflags-dev libpng-dev libjpeg-dev libsqlite3-dev \
             libdrm-dev python3-dev python3-pip
+          # Ubuntu runner pip 装的是新 setuptools, bdist_wheel 命令在独立 wheel 包里
           pip3 install -q --break-system-packages \
+            "setuptools<71" wheel \
             typing-extensions sympy networkx jinja2 fsspec filelock packaging \
-            pyyaml numpy pillow requests setuptools wheel
+            pyyaml numpy pillow requests
           echo "PATH=/opt/rocm/bin:$PATH" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
