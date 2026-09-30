@@ -129,7 +129,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/tmp/pytorch/torch \
             -DCMAKE_PREFIX_PATH=/usr/local/lib/python3.12/dist-packages \
             -DPython_EXECUTABLE=/usr/bin/python3 \
-            -DTORCH_BUILD_VERSION=2.13.0+rocm10.0.0.gfx803 \
+            -DTORCH_BUILD_VERSION=${{ github.event.inputs.torch_tag }}+rocm10.0.0.gfx803 \
             -DUSE_DISTRIBUTED=0 -DUSE_NCCL=0 -DUSE_NUMPY=True \
             > /tmp/cmake.log 2>&1 || EC=$?
           EC=${EC:-0}
@@ -194,6 +194,6 @@ jobs:
       - name: 上传 wheel
         uses: actions/upload-artifact@v4
         with:
-          name: torch-2.13.0-gfx803-rocm10
+          name: torch-gfx803-rocm10-${{ github.event.inputs.torch_tag }}
           path: /tmp/pytorch/dist/*.whl
           retention-days: 30
