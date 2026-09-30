@@ -40,9 +40,9 @@ jobs:
             libdrm-dev python3-dev python3-pip
           # Ubuntu runner pip 装的是新 setuptools, bdist_wheel 命令在独立 wheel 包里
           pip3 install -q --break-system-packages \
-            "setuptools<71" wheel \
+            "setuptools<71" wheel build \
             typing-extensions sympy networkx jinja2 fsspec filelock packaging \
-            pyyaml numpy pillow requests
+            pyyaml numpy pillow requests tomli
           echo "PATH=/opt/rocm/bin:$PATH" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
@@ -165,7 +165,19 @@ jobs:
           export ROCM_PATH=/opt/rocm
           export MAX_JOBS=4
           export USE_NCCL=0 USE_DISTRIBUTED=0
-          python3 setup.py bdist_wheel > /tmp/build.log 2>&1 || EC=$?
+          # v2.14+: setup.py bdist_wheel 已废弃 (scikit-build-core PEP517);
+          # ≤2.13: 仍走 setup.py。按 torch_tag 分派。
+          TAG="${{ github.event.inputs.torch_tag }}"
+          MAJ=$(echo "$TAG" | sed 's/^v//;s/\..*//')
+          MIN=$(echo "$TAG" | sed 's/^v[0-9]*\.//;s/[^0-9].*//')
+          if [ "$MAJ" -eq 2 ] && [ "$MIN" -ge 14 ] 2>/dev/null; then
+            # PEP517 不转发 -D 参数: 版本号/关键开关走 env (官方 build.sh 同款)
+            export TORCH_BUILD_VERSION="${TAG}+rocm10.0.0.gfx803"
+            # 预配置 build/ 保留 hipcc-link 与全部 -D 参数; SKB 会复用该 cache
+            python3 -m build --wheel --no-isolation > /tmp/build.log 2>&1 || EC=$?
+          else
+            python3 setup.py bdist_wheel > /tmp/build.log 2>&1 || EC=$?
+          fi
           EC=${EC:-0}
           tail -40 /tmp/build.log
           echo "=== 构建日志错误段 ==="
