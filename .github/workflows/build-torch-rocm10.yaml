@@ -39,8 +39,9 @@ jobs:
             libgoogle-glog-dev libgflags-dev libpng-dev libjpeg-dev libsqlite3-dev \
             libdrm-dev python3-dev python3-pip
           # Ubuntu runner pip 装的是新 setuptools, bdist_wheel 命令在独立 wheel 包里
+          # --no-isolation 要求 build-system.requires 预装 (scikit-build-core>=1.0, six)
           pip3 install -q --break-system-packages \
-            "setuptools<71" wheel build \
+            "setuptools<71" wheel build "scikit-build-core>=1.0" six \
             typing-extensions sympy networkx jinja2 fsspec filelock packaging \
             pyyaml numpy pillow requests tomli
           echo "PATH=/opt/rocm/bin:$PATH" >> $GITHUB_ENV
