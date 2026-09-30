@@ -1,0 +1,196 @@
+name: build-torch-gfx803-rocm10
+
+on:
+  workflow_dispatch:
+    inputs:
+      rocm_version:
+        description: 'ROCm 版本 (stable.repo.amd.com tarball)'
+        required: false
+        default: '10.0.0'
+      torch_tag:
+        description: 'PyTorch tag'
+        required: false
+        default: 'v2.13.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载并解压 ROCm 10.0.0 官方 tarball
+        run: |
+          set -e
+          VER="${{ github.event.inputs.rocm_version }}"
+          curl -sSL --retry 3 -o /tmp/rocm.tar.gz \
+            "https://stable.repo.amd.com/rocm/core/tarball/therock-dist-linux-multiarch-${VER}.tar.gz"
+          stat -c%s /tmp/rocm.tar.gz
+          sudo mkdir -p /opt/rocm-${VER}
+          sudo tar -x -f /tmp/rocm.tar.gz -C /opt/rocm-${VER} --strip-components=1
+          # kineto roctracer 硬编码 -I/opt/rocm/include/roctracer
+          sudo ln -sfn /opt/rocm-${VER} /opt/rocm
+          ls /opt/rocm/include/roctracer/roctracer.h >/dev/null && echo "roctracer.h OK"
+          /opt/rocm/bin/hipcc --version | head -2 && echo "ROCm 解压 OK"
+
+      - name: 准备构建环境
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build cmake libopenmpi-dev libomp-dev libnuma-dev \
+            libgoogle-glog-dev libgflags-dev libpng-dev libjpeg-dev libsqlite3-dev \
+            python3-dev python3-pip
+          pip3 install -q --break-system-packages \
+            typing-extensions sympy networkx jinja2 fsspec filelock packaging \
+            pyyaml numpy pillow requests setuptools wheel
+          echo "PATH=/opt/rocm/bin:$PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: checkout pytorch ${{ github.event.inputs.torch_tag }}
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.torch_tag }}"
+          git clone --depth 1 --branch "$TAG" https://github.com/pytorch/pytorch.git /tmp/pytorch
+          cd /tmp/pytorch
+          git submodule sync
+          git submodule update --init --recursive --depth 1 > /tmp/submodule.log 2>&1 || EC=$?
+          EC=${EC:-0}
+          echo "submodule exit: $EC"
+          tail -3 /tmp/submodule.log
+          # 关键 submodule 文件验证 (被 tail 吞错的教训)
+          ls third_party/kineto/libkineto/src/RoctracerActivityApi.cpp >/dev/null
+          ls third_party/composable_kernel >/dev/null
+          exit $EC
+
+      - name: 应用 gfx803 wave64 修复 (2.13 headeronly 新路径)
+        run: |
+          set -e
+          cd /tmp/pytorch
+          # 2.13 起宏在 torch/headeronly/macros/Macros.h (c10/macros/Macros.h 已变转发头)
+          # GCN 全系列 (GFX7/8/9) wave64, 仅 RDNA (GFX10+) wave32
+          grep -n "defined(__GFX9__)" torch/headeronly/macros/Macros.h | head -4
+          python3 - <<'EOF'
+          p = 'torch/headeronly/macros/Macros.h'
+          s = open(p).read()
+          old = '#if defined(__GFX9__)'
+          new = '#if defined(__GFX7__) || defined(__GFX8__) || defined(__GFX9__)'
+          assert old in s, "Macros.h 结构不符预期!"
+          s = s.replace(old, new)
+          old2 = '#elif defined(__GFX9__)'
+          new2 = '#elif defined(__GFX7__) || defined(__GFX8__) || defined(__GFX9__)'
+          assert old2 in s, "LOWER/UPPER_BOUND 段不符预期!"
+          s = s.replace(old2, new2)
+          open(p, 'w').write(s)
+          print("wave64 patch applied (2 sites)")
+          EOF
+          grep -n -A1 "defined(__GFX7__)" torch/headeronly/macros/Macros.h | head -6
+
+      - name: 去除 --offload-compress (gfx803 fatbin 修复)
+        run: |
+          set -e
+          cd /tmp/pytorch
+          # gfx803 上压缩 fatbin 经 ld 拼接后 HIP 运行时解析失败 (error 218)
+          grep -n "offload-compress" cmake/Dependencies.cmake
+          sed -i 's/ --offload-compress//' cmake/Dependencies.cmake
+          grep -c "offload-compress" cmake/Dependencies.cmake || echo "PATCH_OK"
+
+      - name: hipify 生成 ROCm 源
+        run: |
+          cd /tmp/pytorch
+          python3 tools/amd_build/build_amd.py > /tmp/hipify.log 2>&1 || EC=$?
+          EC=${EC:-0}
+          echo "=== hipify exit: $EC ==="
+          tail -5 /tmp/hipify.log
+          ls -la c10/hip/impl/hip_cmake_macros.h.in 2>&1 | head -1
+          ls -la aten/src/ATen/hip/HIPConfig.h.in 2>&1 | head -1
+          ls -d aten/src/THH c10/hip/test 2>&1 | head -2
+          exit $EC
+
+      - name: hipcc 链接器 (gfx803 fatbin 注册修复)
+        run: |
+          set -e
+          cat > /tmp/hipcc-link.cmake <<'EOF'
+          set(CMAKE_CXX_CREATE_SHARED_LIBRARY "hipcc <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> <SONAME_FLAG><TARGET_SONAME> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
+          set(CMAKE_CXX_LINK_EXECUTABLE "hipcc <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+          EOF
+          cat /tmp/hipcc-link.cmake
+
+      - name: CMake configure
+        run: |
+          cd /tmp/pytorch
+          export PATH=/opt/rocm/bin:$PATH
+          export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+          export PYTORCH_ROCM_ARCH=gfx803
+          export ROCM_PATH=/opt/rocm
+          export USE_NCCL=0 USE_DISTRIBUTED=0
+          rm -rf build && mkdir -p build
+          cmake -C /tmp/hipcc-link.cmake -S /tmp/pytorch -B /tmp/pytorch/build -GNinja \
+            -DBUILD_PYTHON=True -DBUILD_TEST=True -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/pytorch/torch \
+            -DCMAKE_PREFIX_PATH=/usr/local/lib/python3.12/dist-packages \
+            -DPython_EXECUTABLE=/usr/bin/python3 \
+            -DTORCH_BUILD_VERSION=2.13.0+rocm10.0.0.gfx803 \
+            -DUSE_DISTRIBUTED=0 -DUSE_NCCL=0 -DUSE_NUMPY=True \
+            > /tmp/cmake.log 2>&1 || EC=$?
+          EC=${EC:-0}
+          echo "=== CMake exit: $EC ==="
+          grep -n -B5 -A25 "CMake Error" /tmp/cmake.log | head -120 || true
+          tail -40 /tmp/cmake.log
+          if [ "$EC" = "0" ]; then
+            ls /tmp/pytorch/build/CMakeCache.txt && ls /tmp/pytorch/build/build.ninja && echo "CONFIGURE OK"
+          fi
+          exit $EC
+
+      - name: 上传 cmake 日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-log
+          path: /tmp/cmake.log
+          retention-days: 30
+
+      - name: 生成 codegen 头文件
+        run: |
+          set -e
+          cd /tmp/pytorch/build
+          ninja ATEN_CPU_FILES_GEN_TARGET ATEN_CUDA_FILES_GEN_TARGET 2>&1 | tail -3
+          ls aten/src/ATen/core/TensorBody.h && echo "CODEGEN OK"
+
+      - name: 编译 torch gfx803
+        run: |
+          cd /tmp/pytorch
+          export PATH=/opt/rocm/bin:$PATH
+          export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+          export PYTORCH_ROCM_ARCH=gfx803
+          export ROCM_PATH=/opt/rocm
+          export MAX_JOBS=4
+          export USE_NCCL=0 USE_DISTRIBUTED=0
+          python3 setup.py bdist_wheel > /tmp/build.log 2>&1 || EC=$?
+          EC=${EC:-0}
+          tail -40 /tmp/build.log
+          echo "=== 构建日志错误段 ==="
+          grep -n -i -B3 -A10 "error:" /tmp/build.log | head -100 || true
+          if [ "$EC" = "0" ]; then
+            ls -la dist/ && echo "WHEEL OK"
+          fi
+          exit $EC
+
+      - name: 上传构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
+          retention-days: 30
+
+      - name: 验证 wheel 含 gfx803
+        run: |
+          set -e
+          cd /tmp/pytorch/dist
+          W=$(ls *.whl | head -1)
+          unzip -o -q "$W" -d /tmp/wheel-extract 'torch/lib/libtorch_hip.so' || true
+          echo "gfx803 strings: $(strings /tmp/wheel-extract/torch/lib/libtorch_hip.so | grep -c gfx803)"
+
+      - name: 上传 wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: torch-2.13.0-gfx803-rocm10
+          path: /tmp/pytorch/dist/*.whl
+          retention-days: 30
