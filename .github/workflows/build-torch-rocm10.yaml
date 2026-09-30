@@ -34,9 +34,10 @@ jobs:
         run: |
           set -e
           sudo apt-get update -qq
+          # rocm_smi-config.cmake 现在 pkg_check_modules(libdrm REQUIRED)
           sudo apt-get install -y -qq ninja-build cmake libopenmpi-dev libomp-dev libnuma-dev \
             libgoogle-glog-dev libgflags-dev libpng-dev libjpeg-dev libsqlite3-dev \
-            python3-dev python3-pip
+            libdrm-dev python3-dev python3-pip
           pip3 install -q --break-system-packages \
             typing-extensions sympy networkx jinja2 fsspec filelock packaging \
             pyyaml numpy pillow requests setuptools wheel
