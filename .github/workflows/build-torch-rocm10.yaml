@@ -58,8 +58,11 @@ jobs:
           echo "submodule exit: $EC"
           tail -3 /tmp/submodule.log
           # 关键 submodule 文件验证 (被 tail 吞错的教训)
-          ls third_party/kineto/libkineto/src/RoctracerActivityApi.cpp >/dev/null
-          ls third_party/composable_kernel >/dev/null
+          # 注意: 2.14+ kineto 已无 RoctracerActivityApi.cpp (迁 rocprofiler-sdk),
+          # 只查目录非空; /opt/rocm 软链照建不误 (hip 头/库路径仍被别处引用)
+          test -d third_party/kineto/libkineto
+          ls third_party/kineto/libkineto/src | head -1 >/dev/null
+          [ -n "$(ls -A third_party/composable_kernel)" ] || [ ! -d third_party/composable_kernel ]
           exit $EC
 
       - name: 应用 gfx803 wave64 修复 (2.13 headeronly 新路径)
