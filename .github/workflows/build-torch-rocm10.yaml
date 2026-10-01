@@ -48,6 +48,23 @@ jobs:
           echo "PATH=/opt/rocm/bin:$PATH" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
+      - name: 加 swap (防巨型 HIP TU / autograd 绑定 OOM 暴死 runner)
+        run: |
+          set -e
+          # 2.14 TensorTopK 峰值足迹 ~18.6G + torch_python python_functions_*.cpp
+          # 单文件 4-8G, 16G runner 上 4 并发必被 OOM killer 连 runner 一起杀
+          # (表现为 lost communication, 不是编译错误)。runner 有 sudo, 资源盘建 swap。
+          free -m | head -2
+          # 镜像自带 /mnt/swapfile(临时盘)时先卸再重建, 避免 EEXIST/swapon busy
+          sudo swapoff /mnt/swapfile 2>/dev/null || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 24G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=24576
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          echo "=== swap on ==="; free -m | head -3
+          cat /proc/swaps
+
       - name: checkout pytorch ${{ github.event.inputs.torch_tag }}
         run: |
           set -e
@@ -185,14 +202,22 @@ jobs:
           ls aten/src/ATen/core/TensorBody.h && echo "CODEGEN OK"
 
       - name: 编译 torch gfx803
+        timeout-minutes: 320
         run: |
           cd /tmp/pytorch
           export PATH=/opt/rocm/bin:$PATH
           export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
           export PYTORCH_ROCM_ARCH=gfx803
           export ROCM_PATH=/opt/rocm
-          export MAX_JOBS=4
+          export MAX_JOBS=3
           export USE_NCCL=0 USE_DISTRIBUTED=0
+          # 进度 dump: runner 若再被 OOM 打死, GitHub 日志里至少留下
+          # 案发现场(最后编译到哪个对象、内存水位、swap 用量)
+          ( while sleep 120; do
+              echo "--- $(date +%T) mem: $(free -m | awk 'NR==2{printf "%d/%dMB",$3,$2}') swap: $(free -m | awk 'NR==3{printf "%dMB",$3}') | $(grep -oE '\[[0-9]+/[0-9]+\]' /tmp/build.log 2>/dev/null | tail -1)"
+              tail -1 /tmp/build.log 2>/dev/null | cut -c1-160
+              ps -eo pid,etimes,rss,args --sort=-rss | grep "cc1" | grep -v grep | head -3 | awk '{printf "  top: %ds %dMB %s\n",$1,$3/1024,$NF}'
+            done ) & DUMP=$!
           # v2.14+: setup.py bdist_wheel 已废弃 (scikit-build-core PEP517);
           # ≤2.13: 仍走 setup.py。按 torch_tag 分派。
           TAG="${{ github.event.inputs.torch_tag }}"
@@ -206,6 +231,7 @@ jobs:
           else
             python3 setup.py bdist_wheel > /tmp/build.log 2>&1 || EC=$?
           fi
+          kill $DUMP 2>/dev/null || true
           EC=${EC:-0}
           tail -40 /tmp/build.log
           echo "=== 构建日志错误段 ==="
