@@ -40,9 +40,10 @@ jobs:
             libdrm-dev python3-dev python3-pip
           # Ubuntu runner pip 装的是新 setuptools, bdist_wheel 命令在独立 wheel 包里
           # --no-isolation 要求 build-system.requires 预装 (scikit-build-core>=1.0, six)
+          # packaging>=24.2 是 2.14 build-system.requires 硬要求 (runner 系统版 24.0 会 Unmet)
           pip3 install -q --break-system-packages \
-            "setuptools<71" wheel build "scikit-build-core>=1.0" six \
-            typing-extensions sympy networkx jinja2 fsspec filelock packaging \
+            "setuptools<71" wheel build "scikit-build-core>=1.0" "packaging>=24.2" six \
+            typing-extensions sympy networkx jinja2 fsspec filelock \
             pyyaml numpy pillow requests tomli
           echo "PATH=/opt/rocm/bin:$PATH" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
@@ -97,6 +98,29 @@ jobs:
           grep -n "offload-compress" cmake/Dependencies.cmake
           sed -i 's/ --offload-compress//' cmake/Dependencies.cmake
           grep -c "offload-compress" cmake/Dependencies.cmake || echo "PATCH_OK"
+
+      - name: ck_gemm 补 ROCm include (thrust 解析修复)
+        run: |
+          set -e
+          cd /tmp/pytorch
+          # 2.14 把 bgemm 拆成独立 ck_gemm target, 它不链 hip::device, 丢掉了
+          # -isystem ${ROCM_PATH}/include → <thrust> 解析不到 ROCm 版。
+          # 实测 target_include_directories 追加会被 Ninja 生成器对 HIP 对象吞掉
+          # (INCLUDES 不含), 故走 target_compile_options 的 FLAGS 通道。
+          python3 - <<'EOF'
+          p = 'aten/src/ATen/CMakeLists.txt'
+          s = open(p).read()
+          anchor = '    target_compile_options(ck_gemm PRIVATE ${HIP_CXX_FLAGS})\n'
+          add = anchor + '    target_compile_options(ck_gemm PRIVATE -isystem /opt/rocm/include)\n'
+          assert anchor in s, "ck_gemm 锚点不符预期!"
+          if '-isystem /opt/rocm/include' not in s:
+              s = s.replace(anchor, add, 1)
+              open(p, 'w').write(s)
+              print("ck_gemm include patch applied")
+          else:
+              print("already patched")
+          EOF
+          grep -n "isystem /opt/rocm/include" aten/src/ATen/CMakeLists.txt
 
       - name: hipify 生成 ROCm 源
         run: |
