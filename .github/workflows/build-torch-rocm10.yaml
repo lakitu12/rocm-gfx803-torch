@@ -38,6 +38,22 @@ jobs:
           sudo apt-get install -y -qq ninja-build cmake libopenmpi-dev libomp-dev libnuma-dev \
             libgoogle-glog-dev libgflags-dev libpng-dev libjpeg-dev libsqlite3-dev \
             libdrm-dev python3-dev python3-pip
+          # 坑4复刻: apt 依赖拖进 Ubuntu 旧版 libhsa-runtime64(5.7.1, 仅258个ROCR_1符号),
+          # ROCm 10 libamdhip64.so.7 需要281个。链接测试/可执行文件时
+          # -Wl,-rpath-link,/usr/lib/x86_64-linux-gnu 优先于 -L/opt/rocm/lib 命中旧版
+          # → undefined reference to `hsa_*@ROCR_1` → ninja -k 1 进 drain 烧光剩余时间。
+          # 本机同款修法: 移开系统版让 ld.so 落到 /opt/rocm/lib (run 36838507186 实证)。
+          for f in /usr/lib/x86_64-linux-gnu/libhsa-runtime64.so*; do
+            [ -e "$f" ] && sudo mv "$f" "$f.bak-ubuntu" || true
+          done
+          ls /usr/lib/x86_64-linux-gnu/libhsa-runtime64.so* 2>/dev/null | grep -v '\.bak-' \
+            && echo "WARN: 系统 libhsa 仍在" || echo "system libhsa removed OK"
+          # 硬验证: 复刻死亡现场链接方式 —— -rpath-link 指旧目录、仅 -L/opt/rocm/lib,
+          # 期望 ld 不再报 hsa 符号、ldd 落到 /opt/rocm/lib
+          echo 'int main(){return 0;}' > /tmp/hsacheck.c
+          gcc /tmp/hsacheck.c -o /tmp/hsacheck -L/opt/rocm/lib -lamdhip64 \
+            -Wl,-rpath-link,/usr/lib/x86_64-linux-gnu -Wl,-rpath,/opt/rocm/lib
+          ldd /tmp/hsacheck | grep -F "libhsa-runtime64" || { echo "WARN: probe ldd 无 libhsa"; true; }
           # Ubuntu runner pip 装的是新 setuptools, bdist_wheel 命令在独立 wheel 包里
           # --no-isolation 要求 build-system.requires 预装 (scikit-build-core>=1.0, six)
           # packaging>=24.2 是 2.14 build-system.requires 硬要求 (runner 系统版 24.0 会 Unmet)
@@ -169,8 +185,11 @@ jobs:
           export ROCM_PATH=/opt/rocm
           export USE_NCCL=0 USE_DISTRIBUTED=0
           rm -rf build && mkdir -p build
+          # BUILD_TEST=False: wheel 不含 gtest 测试二进制。run 36838507186 里
+          # 3558 条边中 ~700 条是测试(编译+链接), 死亡链接错误(hsa@ROCR_1)正出在测试边;
+          # 关掉后尾段大幅瘦身, 330min 预算可容纳。
           cmake -C /tmp/hipcc-link.cmake -S /tmp/pytorch -B /tmp/pytorch/build -GNinja \
-            -DBUILD_PYTHON=True -DBUILD_TEST=True -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_PYTHON=True -DBUILD_TEST=False -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/tmp/pytorch/torch \
             -DCMAKE_PREFIX_PATH=/usr/local/lib/python3.12/dist-packages \
             -DPython_EXECUTABLE=/usr/bin/python3 \
@@ -202,7 +221,9 @@ jobs:
           ls aten/src/ATen/core/TensorBody.h && echo "CODEGEN OK"
 
       - name: 编译 torch gfx803
-        timeout-minutes: 320
+        # 实测 200min 走完 3263/3558(含重尾); BUILD_TEST=False 砍掉测试边后 330 足够,
+        # job 级 360min 上限内留上传余量
+        timeout-minutes: 330
         run: |
           cd /tmp/pytorch
           export PATH=/opt/rocm/bin:$PATH
