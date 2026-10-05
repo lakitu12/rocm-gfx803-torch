@@ -155,17 +155,19 @@ jobs:
           EOF
           grep -n "isystem /opt/rocm/include" aten/src/ATen/CMakeLists.txt
 
-      - name: TensorTopK 巨型 TU 降为 -O0 (16G runner 内存墙)
+      - name: TensorTopK 巨型 TU 降为 -O1 (16G runner 内存墙; 禁 -O0!)
         run: |
           set -e
           cd /tmp/pytorch
-          # run 37214177594 实证: 3075/3082 后 110min 零进度 = TensorTopK.hip 单进程
-          # RSS 600MB→14.9G + swap 12.8G, 16G runner 上 solo 也装不下它的足迹。
-          # 坑(run 37260289497+本地复现): source file property 是**目录作用域**,
-          # torch_hip target 定义在 caffe2/CMakeLists.txt(add_library(torch_hip
-          # ${Caffe2_HIP_SRCS})), 挂到 aten 子目录不生效 → 必须在 caffe2 同作用域、
-          # 且用 Caffe2_HIP_SRCS 里登记的原始路径字符串匹配(实测为绝对路径)。
-          # 本地 ROCm10 树 reconfigure 实证: 对象命令 -O3 后追加 -O0, 后者胜。
+          # 内存墙(run 37214177594): 3075/3082 后 TensorTopK.hip 单进程 RSS 14.9G+swap 12.8G,
+          # solo 也 thrash。降档实测(本机 ROCm10/clang23, 14G cgroup 限额):
+          #   -O0: 784MB/141s 但 1377/1378 kernel uses_dynamic_stack=true →
+          #        gfx803 scratch 分配路径拿 nil → topk 一跑整机 GPU hang (10-05 真机血证)
+          #   -O1: ~2.5G/306s, dynamic_stack 1378 全 false ✓ 选它
+          #   -O2: 60min 编不完+9.5G+swap 10G (thrash 重演) ✗ ; -O3: 死亡基线 ✗
+          # 作用域坑(run 37260289497+本地复现): source file property 是目录作用域,
+          # 必须挂在 caffe2/CMakeLists.txt 的 add_library(torch_hip) 之后(同作用域),
+          # 并用 Caffe2_HIP_SRCS 登记的原始路径字符串匹配(实测绝对路径)。
           python3 - <<'EOF'
           p = 'caffe2/CMakeLists.txt'
           s = open(p).read()
@@ -180,15 +182,15 @@ jobs:
               '    endif()\n'
               '  endforeach()\n'
               '  if(_fat_tus)\n'
-              '    set_source_files_properties(${_fat_tus} PROPERTIES COMPILE_OPTIONS "-O0")\n'
-              '    message(STATUS "FAT_TU_O0: ${_fat_tus}")\n'
+              '    set_source_files_properties(${_fat_tus} PROPERTIES COMPILE_OPTIONS "-O1")\n'
+              '    message(STATUS "FAT_TU_O1: ${_fat_tus}")\n'
               '  else()\n'
-              '    message(STATUS "FAT_TU_O0_NOTFOUND")\n'
+              '    message(STATUS "FAT_TU_O1_NOTFOUND")\n'
               '  endif()\n'
           )
           s = s.replace(anchor, anchor + block, 1)
           open(p, 'w').write(s)
-          print("TensorTopK -O0 property appended (caffe2 scope)")
+          print("TensorTopK -O1 property appended (caffe2 scope)")
           EOF
 
       - name: hipify 生成 ROCm 源
@@ -238,12 +240,12 @@ jobs:
           tail -40 /tmp/cmake.log
           if [ "$EC" = "0" ]; then
             ls /tmp/pytorch/build/CMakeCache.txt && ls /tmp/pytorch/build/build.ninja && echo "CONFIGURE OK"
-            # TensorTopK 必须带 -O0, 否则又是 solo thrash 烧满超时 —— 当场 fail 不等 5h
-            grep -m1 "FAT_TU_O0" /tmp/cmake.log || { echo "FAT_TU_O0 未生效!"; exit 1; }
+            # TensorTopK 必须带 -O1, 否则又是 solo thrash 烧满超时 —— 当场 fail 不等 5h
+            grep -m1 "FAT_TU_O1" /tmp/cmake.log || { echo "FAT_TU_O1 未生效!"; exit 1; }
             # -C 必须在 -t 之前, 否则被当作子命令参数 (run 37257546507 假警报教训)
             ninja -C /tmp/pytorch/build -t commands caffe2/CMakeFiles/torch_hip.dir/__/aten/src/ATen/native/hip/TensorTopK.hip.o \
-              | tail -1 | grep -q -- "-O0" || { echo "TensorTopK.o 命令不含 -O0!"; exit 1; }
-            echo "TENSOR TOPK -O0 VERIFIED"
+              | tail -1 | grep -qE -- "-O3 .*-O1| -O1 " || { echo "TensorTopK.o 命令不含 -O1!"; exit 1; }
+            echo "TENSOR TOPK -O1 VERIFIED"
           fi
           exit $EC
 
@@ -311,6 +313,43 @@ jobs:
           name: build-log
           path: /tmp/build.log
           retention-days: 30
+
+      - name: fatbin 元数据门禁 (dynamic_stack 回归拦截)
+        if: success()
+        run: |
+          set -e
+          # -O0 血证(run 37261601246 wheel 上机): clang23 -O0 给 1377/1378 kernel
+          # 打 uses_dynamic_stack=true, gfx803 scratch 分配拿 nil → topk 一跑整机 GPU hang。
+          # 链接后 .so 是压缩容器(CCOB)明文扫不到, 必须逐 .o 扫 __CL 容器。
+          # 判据校准(本地实测): -O0 对象 true=1377 判FAIL; -O1/Sort-O3 true=0 false>0 判OK。
+          python3 - <<'EOF'
+          import subprocess, os, sys, glob
+          CL='/opt/rocm/lib/llvm/bin'  # tarball 实测路径(bin 下无 llvm-objcopy)
+          objs=glob.glob('/tmp/pytorch/build/caffe2/CMakeFiles/torch_hip.dir/**/*.hip.o', recursive=True)
+          objs+=glob.glob('/tmp/pytorch/build/aten/src/ATen/CMakeFiles/hip_*.dir/**/*.hip.o', recursive=True)
+          print(f'scanning {len(objs)} hip objects')
+          bad=[]; scanned=0
+          for o in objs:
+              tmp='/tmp/_g.bin'
+              subprocess.run([f'{CL}/llvm-objcopy','--dump-section=.hip_fatbin='+tmp,o,'/dev/null'],capture_output=True)
+              if not os.path.exists(tmp): continue
+              d=open(tmp,'rb').read(); os.remove(tmp)
+              if not d: continue
+              scanned+=1
+              pos=0; t=0; f=0
+              while True:
+                  pos=d.find(b'uses_dynamic_stack',pos+1)
+                  if pos<0: break
+                  nxt=d[pos+18:pos+19]
+                  if nxt in (b'\xc3',b'\x01'): t+=1
+                  elif nxt in (b'\xc2',b'\x00'): f+=1
+              if t>0: bad.append((o,t,f))
+          if scanned==0:
+              print('GATE FAIL: 没有对象含 fatbin (构建异常)'); sys.exit(2)
+          for o,t,f in bad[:10]: print(f'FAIL {o}: dynamic_stack true={t} false={f}')
+          if bad: print(f'GATE FAIL: {len(bad)}/{scanned} 个对象含 dynamic_stack kernel'); sys.exit(1)
+          print(f'GATE OK: {scanned} 个 fatbin 全部 dynamic_stack=false')
+          EOF
 
       - name: 验证 wheel 含 gfx803
         run: |
