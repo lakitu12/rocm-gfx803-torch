@@ -155,6 +155,33 @@ jobs:
           EOF
           grep -n "isystem /opt/rocm/include" aten/src/ATen/CMakeLists.txt
 
+      - name: TensorTopK 巨型 TU 降为 -O0 (16G runner 内存墙)
+        run: |
+          set -e
+          cd /tmp/pytorch
+          # run 37214177594 实证: 3075/3082 后 110min 零进度 = TensorTopK.hip 单进程
+          # RSS 600MB→14.9G + swap 12.8G, 16G runner 上 solo 也装不下它的足迹。
+          # clang 内存大头在优化pass(RA/展开/SLP); 对此 TU 降 -O0, 正确性不受影响,
+          # topk 核性能损失在 590 上无关痛痒。源码属性排在 target 选项之后, 覆盖 -O3。
+          python3 - <<'EOF'
+          p = 'aten/src/ATen/CMakeLists.txt'
+          block = (
+              '\n# gfx803 CI patch: 巨型 HIP TU 降优化 (runner 16G 内存墙)\n'
+              '# run 37214177594: 3075/3082 后 solo thrash 110min, RSS 峰值 14.9G+swap12.8G。\n'
+              '# -O0 砍掉优化pass内存大头(RA/展开), 正确性不变; clang 后者胜, 实测 -O0 覆盖 -O3。\n'
+              '# property 按源码相对/绝对两种形态都挂一次, 保证匹配 ninja 实际路径。\n'
+              'foreach(_fat native/hip/TensorTopK.hip)\n'
+              '  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${_fat})\n'
+              '    set_source_files_properties(${_fat} PROPERTIES COMPILE_OPTIONS "-O0")\n'
+              '    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/${_fat} PROPERTIES COMPILE_OPTIONS "-O0")\n'
+              '    message(STATUS "FAT_TU_O0: ${_fat}")\n'
+              '  endif()\n'
+              'endforeach()\n'
+          )
+          open(p, 'a').write(block)
+          print("TensorTopK -O0 property appended")
+          EOF
+
       - name: hipify 生成 ROCm 源
         run: |
           cd /tmp/pytorch
@@ -202,6 +229,11 @@ jobs:
           tail -40 /tmp/cmake.log
           if [ "$EC" = "0" ]; then
             ls /tmp/pytorch/build/CMakeCache.txt && ls /tmp/pytorch/build/build.ninja && echo "CONFIGURE OK"
+            # TensorTopK 必须带 -O0, 否则又是 solo thrash 烧满超时 —— 当场 fail 不等 5h
+            grep -m1 "FAT_TU_O0" /tmp/cmake.log || { echo "FAT_TU_O0 未生效!"; exit 1; }
+            ninja -t commands -C /tmp/pytorch/build caffe2/CMakeFiles/torch_hip.dir/__/aten/src/ATen/native/hip/TensorTopK.hip.o \
+              | tail -1 | grep -q -- "-O0" || { echo "TensorTopK.o 命令不含 -O0!"; exit 1; }
+            echo "TENSOR TOPK -O0 VERIFIED"
           fi
           exit $EC
 
