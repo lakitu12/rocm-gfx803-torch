@@ -161,25 +161,34 @@ jobs:
           cd /tmp/pytorch
           # run 37214177594 实证: 3075/3082 后 110min 零进度 = TensorTopK.hip 单进程
           # RSS 600MB→14.9G + swap 12.8G, 16G runner 上 solo 也装不下它的足迹。
-          # clang 内存大头在优化pass(RA/展开/SLP); 对此 TU 降 -O0, 正确性不受影响,
-          # topk 核性能损失在 590 上无关痛痒。源码属性排在 target 选项之后, 覆盖 -O3。
+          # 坑(run 37260289497+本地复现): source file property 是**目录作用域**,
+          # torch_hip target 定义在 caffe2/CMakeLists.txt(add_library(torch_hip
+          # ${Caffe2_HIP_SRCS})), 挂到 aten 子目录不生效 → 必须在 caffe2 同作用域、
+          # 且用 Caffe2_HIP_SRCS 里登记的原始路径字符串匹配(实测为绝对路径)。
+          # 本地 ROCm10 树 reconfigure 实证: 对象命令 -O3 后追加 -O0, 后者胜。
           python3 - <<'EOF'
-          p = 'aten/src/ATen/CMakeLists.txt'
+          p = 'caffe2/CMakeLists.txt'
+          s = open(p).read()
+          anchor = '  add_library(torch_hip ${Caffe2_HIP_SRCS})\n'
+          assert anchor in s, "add_library(torch_hip) 锚点不符预期!"
           block = (
-              '\n# gfx803 CI patch: 巨型 HIP TU 降优化 (runner 16G 内存墙)\n'
-              '# run 37214177594: 3075/3082 后 solo thrash 110min, RSS 峰值 14.9G+swap12.8G。\n'
-              '# -O0 砍掉优化pass内存大头(RA/展开), 正确性不变; clang 后者胜, 实测 -O0 覆盖 -O3。\n'
-              '# property 按源码相对/绝对两种形态都挂一次, 保证匹配 ninja 实际路径。\n'
-              'foreach(_fat native/hip/TensorTopK.hip)\n'
-              '  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${_fat})\n'
-              '    set_source_files_properties(${_fat} PROPERTIES COMPILE_OPTIONS "-O0")\n'
-              '    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/${_fat} PROPERTIES COMPILE_OPTIONS "-O0")\n'
-              '    message(STATUS "FAT_TU_O0: ${_fat}")\n'
+              '\n  # gfx803 CI: fat TU 降优化(与 target 同目录作用域, 遍历源列表匹配登记路径)\n'
+              '  set(_fat_tus "")\n'
+              '  foreach(_s IN LISTS Caffe2_HIP_SRCS)\n'
+              '    if(_s MATCHES "native/hip/TensorTopK[.]hip$")\n'
+              '      list(APPEND _fat_tus ${_s})\n'
+              '    endif()\n'
+              '  endforeach()\n'
+              '  if(_fat_tus)\n'
+              '    set_source_files_properties(${_fat_tus} PROPERTIES COMPILE_OPTIONS "-O0")\n'
+              '    message(STATUS "FAT_TU_O0: ${_fat_tus}")\n'
+              '  else()\n'
+              '    message(STATUS "FAT_TU_O0_NOTFOUND")\n'
               '  endif()\n'
-              'endforeach()\n'
           )
-          open(p, 'a').write(block)
-          print("TensorTopK -O0 property appended")
+          s = s.replace(anchor, anchor + block, 1)
+          open(p, 'w').write(s)
+          print("TensorTopK -O0 property appended (caffe2 scope)")
           EOF
 
       - name: hipify 生成 ROCm 源
