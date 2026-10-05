@@ -231,7 +231,8 @@ jobs:
             ls /tmp/pytorch/build/CMakeCache.txt && ls /tmp/pytorch/build/build.ninja && echo "CONFIGURE OK"
             # TensorTopK 必须带 -O0, 否则又是 solo thrash 烧满超时 —— 当场 fail 不等 5h
             grep -m1 "FAT_TU_O0" /tmp/cmake.log || { echo "FAT_TU_O0 未生效!"; exit 1; }
-            ninja -t commands -C /tmp/pytorch/build caffe2/CMakeFiles/torch_hip.dir/__/aten/src/ATen/native/hip/TensorTopK.hip.o \
+            # -C 必须在 -t 之前, 否则被当作子命令参数 (run 37257546507 假警报教训)
+            ninja -C /tmp/pytorch/build -t commands caffe2/CMakeFiles/torch_hip.dir/__/aten/src/ATen/native/hip/TensorTopK.hip.o \
               | tail -1 | grep -q -- "-O0" || { echo "TensorTopK.o 命令不含 -O0!"; exit 1; }
             echo "TENSOR TOPK -O0 VERIFIED"
           fi
