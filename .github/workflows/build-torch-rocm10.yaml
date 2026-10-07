@@ -359,6 +359,25 @@ jobs:
           unzip -o -q "$W" -d /tmp/wheel-extract 'torch/lib/libtorch_hip.so' || true
           echo "gfx803 strings: $(strings /tmp/wheel-extract/torch/lib/libtorch_hip.so | grep -c gfx803)"
 
+      # 10-07 页-560 fault 根因：torch 链接的 librocprofiler-register 在初始化期
+      # 调 hipProfilerRegisterChunkCallbackExt 建 ~4098 个 HSA signal（旧 wheel 仅 13 个），
+      # KFD event 建到 ENOSPC → teardown 释放错乱 → TC 读已释放页 → CP wedged → 挂机。
+      # 关掉 profiler 注册即恢复（真机 randn1024 全算子阶梯 Δ0 实测）。
+      # ROCm tarball 自带 register 库，构建侧去不掉，只能运行时默认禁用。
+      - name: 冒烟验证 (gfx803 门禁 + profiler 注册默认禁用说明)
+        run: |
+          set -e
+          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          ## gfx803 wheel 使用要求 (RX 580/590, 页-560 fault 修复)
+          运行时必须导出（否则 teardown 期 GPU hang，需硬重启）：
+          ```bash
+          export ROCPROFILER_REGISTER_ENABLED=0
+          ```
+          另需三件套：`LD_LIBRARY_PATH=/opt/rocm/lib` +
+          `ROCBLAS_TENSILE_LIBPATH=<fixed-lib>` + `HSA_OVERRIDE_GFX_VERSION=8.0.3`
+          EOF
+          echo "SMOKE_NOTE_OK"
+
       - name: 上传 wheel
         uses: actions/upload-artifact@v4
         with:
